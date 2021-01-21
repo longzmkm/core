@@ -4,7 +4,12 @@ import threading
 
 from pymodbus.client.sync import ModbusSerialClient, ModbusTcpClient, ModbusUdpClient
 from pymodbus.transaction import ModbusRtuFramer
+from paho.mqtt import client as mqtt_client
+import paho.mqtt.subscribe as subscribe
+import redis
 import voluptuous as vol
+from threading import Thread
+import random
 
 from homeassistant.const import (
     ATTR_STATE,
@@ -34,8 +39,15 @@ from .const import (
     SERVICE_WRITE_REGISTER,
 )
 
-_LOGGER = logging.getLogger(__name__)
 
+def async_call(fn):
+    def wrapper(*args, **kwargs):
+        Thread(target=fn, args=args, kwargs=kwargs).start()
+
+    return wrapper
+
+
+_LOGGER = logging.getLogger(__name__)
 
 BASE_SCHEMA = vol.Schema({vol.Optional(CONF_NAME, default=DEFAULT_HUB): cv.string})
 
@@ -155,7 +167,7 @@ class ModbusHub:
         self._config_port = client_config[CONF_PORT]
         self._config_timeout = client_config[CONF_TIMEOUT]
         self._config_delay = 0
-
+        self.mqtt_client = None
         if self._config_type == "serial":
             # serial configuration
             self._config_method = client_config[CONF_METHOD]
@@ -177,9 +189,40 @@ class ModbusHub:
         """Return the name of this hub."""
         return self._config_name
 
+    @async_call
+    def get_paylod_set_value(self, client, userdata, message):
+        # TODO  设置redis地址  连接地址 把传感器的值写入redis中
+
+        redis_client = redis.Redis("0.0.0.0")
+        topic = message.topic
+        message = message.payload.decode('utf-8')
+        redis_client.set(topic, message)
+        print('set topic:%s ,value:%s' % (topic, message))
+
+    @async_call
+    def set_subscribe(self):
+        print('set_subscribe')
+        # TODO 获取环境变量中的userid
+        subscribe.callback(self.get_paylod_set_value, '1026/modbusRtu/up/+',
+                           hostname='52.130.92.191', port=1883,
+                           client_id=f'ha-modbus-{random.randint(0, 1000)}',
+                           keepalive=60)
+
+    def connect_mqtt(self):
+        self.set_subscribe()
+        client_id = f'ha-modbus--{random.randint(0, 1000)}'
+        print(client_id)
+        client = mqtt_client.Client(client_id)
+        client.connect('52.130.92.191', 1883)
+        return client
+
+    def init_mqtt(self):
+        self.mqtt_client = self.connect_mqtt()
+
     def setup(self):
         """Set up pymodbus client."""
         if self._config_type == "serial":
+            # TODO  redis 和mqtt的链接
             self._client = ModbusSerialClient(
                 method=self._config_method,
                 port=self._config_port,
@@ -189,6 +232,7 @@ class ModbusHub:
                 parity=self._config_parity,
                 timeout=self._config_timeout,
                 retry_on_empty=True,
+                mqtt_client=self.mqtt_client,
             )
         elif self._config_type == "rtuovertcp":
             self._client = ModbusTcpClient(
